@@ -1,0 +1,149 @@
+/** Catálogos locais e gerador de seleções compartilháveis. */
+window.catalogSourceProducts = {};
+window.customCatalogSelection = [];
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadCatalogSources().finally(renderCatalogosView);
+});
+
+async function loadCatalogSources() {
+  if (window.DalbranCatalogData) {
+    Object.entries(window.DalbranCatalogData).forEach(([key, products]) => {
+      window.catalogSourceProducts[key] = (products || []).map(product => ({ ...product, source: key }));
+    });
+    return;
+  }
+  const sources = [{ key: '2L', script: 'catalogos/2L/script.js' }, { key: '5L', script: 'catalogos/5L/script.js' }];
+  await Promise.all(sources.map(async source => {
+    try {
+      const response = await fetch(source.script);
+      const text = await response.text();
+      const match = text.match(/const\s+products\s*=\s*(\[[\s\S]*?\n\]);\s*\n\s*let\s+currentCategory/);
+      if (!match) throw new Error('Lista de produtos não encontrada');
+      const products = Function(`return (${match[1]});`)();
+      window.catalogSourceProducts[source.key] = products.map(product => ({ ...product, source: source.key }));
+    } catch (error) { console.error(`Erro ao carregar catálogo ${source.key}:`, error); window.catalogSourceProducts[source.key] = []; }
+  }));
+}
+
+function renderCatalogosView() {
+  const container = document.getElementById('view-catalogos');
+  if (!container) return;
+  container.innerHTML = `
+    <div class="view-header catalog-header"><div><h2>Catálogos visuais</h2><p>Abra os catálogos completos ou monte uma seleção para compartilhar.</p></div></div>
+    <div class="catalog-shortcuts">
+      ${catalogShortcut('2L', 'Catálogo 2 litros', 'Linha de produtos 2 L e embalagens menores.')}
+      ${catalogShortcut('5L', 'Catálogo 5 litros', 'Linha institucional e galões de 5 L.')}
+    </div>
+    <section class="custom-catalog-builder"><div class="dashboard-section-header"><div><h3>Catálogo personalizado</h3><span>Escolha os itens abaixo e gere o link visual para o cliente.</span></div><span id="custom-catalog-count">0 selecionados</span></div><div class="catalog-builder-toolbar"><select id="custom-catalog-source"><option value="all">2 L e 5 L</option><option value="2L">Somente 2 L</option><option value="5L">Somente 5 L</option></select><input id="custom-catalog-search" type="search" placeholder="Buscar produto"></div><div id="custom-catalog-products" class="custom-catalog-products"></div><div class="custom-catalog-actions"><button type="button" class="btn btn-outline" id="clear-custom-catalog">Limpar seleção</button><button type="button" class="btn btn-primary" id="generate-custom-catalog">Gerar link do catálogo</button></div><div id="custom-catalog-link" class="custom-catalog-link hidden"></div><p class="catalog-share-note">O link funciona para qualquer pessoa quando o sistema estiver hospedado em uma URL pública. Localmente, ele abre no mesmo dispositivo/rede onde o sistema estiver disponível.</p></section>`;
+  ['2L', '5L'].forEach(size => {
+    document.getElementById(`share-catalog-${size}`).onclick = () => shareCatalogUrl(`catalogos/${size}/index.html`, `Catálogo Dalbran ${size}`); 
+  });
+  document.getElementById('custom-catalog-search').oninput = renderCustomCatalogProducts;
+  document.getElementById('custom-catalog-source').onchange = renderCustomCatalogProducts;
+  document.getElementById('clear-custom-catalog').onclick = () => { window.customCatalogSelection = []; renderCustomCatalogProducts(); document.getElementById('custom-catalog-link').classList.add('hidden'); };
+  document.getElementById('generate-custom-catalog').onclick = generateCustomCatalogLink;
+  renderCustomCatalogProducts();
+}
+
+function catalogShortcut(size, title, description) { return `<article class="catalog-card"><div class="catalog-card-icon">${size}</div><div><h3>${title}</h3><p>${description}</p></div><div class="catalog-card-actions"><a href="catalogos/${size}/index.html" target="_blank" rel="noopener" class="btn btn-primary" id="open-catalog-${size}" style="text-decoration:none;">Abrir catálogo</a><button type="button" class="btn btn-outline" id="share-catalog-${size}">Compartilhar</button></div></article>`; }
+function getCatalogItems() { return Object.values(window.catalogSourceProducts).flat(); }
+function renderCustomCatalogProducts() {
+  const container = document.getElementById('custom-catalog-products'); if (!container) return;
+  const source = document.getElementById('custom-catalog-source')?.value || 'all'; const search = catalogSearchText(document.getElementById('custom-catalog-search')?.value || '');
+  const products = getCatalogItems().filter(product => (source === 'all' || product.source === source) && (!search || catalogSearchText(`${product.title} ${product.categoryName} ${product.volume} ${(product.fragrances || []).join(' ')}`).includes(search)));
+  container.innerHTML = products.length ? products.map(product => { const key = `${product.source}:${product.id}`; const selected = window.customCatalogSelection.includes(key); return `<button type="button" class="custom-catalog-product ${selected ? 'selected' : ''}" onclick="toggleCustomCatalogProduct('${product.source}:${product.id}')"><img src="catalogos/${product.source}/${product.image}" alt=""><span><strong>${escapeCatalogHtml(product.title)}</strong><small>${product.source} · ${escapeCatalogHtml(product.volume)}</small></span><b>${selected ? '✓' : '+'}</b></button>`; }).join('') : '<p class="empty-state">Nenhum produto encontrado.</p>';
+  document.getElementById('custom-catalog-count').textContent = `${window.customCatalogSelection.length} selecionado(s)`;
+}
+function catalogSearchText(value) { return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim(); }
+window.toggleCustomCatalogProduct = key => { const selected = window.customCatalogSelection; const index = selected.indexOf(key); if (index >= 0) selected.splice(index, 1); else selected.push(key); renderCustomCatalogProducts(); };
+function generateCustomCatalogLink() {
+  const selectedKeys = window.customCatalogSelection;
+  if (!selectedKeys.length) { showToast('Selecione ao menos um produto.', 'error'); return; }
+
+  const grouped = {};
+  selectedKeys.forEach(key => {
+    const [source, id] = key.split(':');
+    if (!grouped[source]) grouped[source] = [];
+    grouped[source].push(id);
+  });
+
+  const compactHash = 'p=' + Object.entries(grouped).map(([src, ids]) => `${src}:${ids.join(',')}`).join(';');
+  const url = new URL(`catalogos/personalizado.html#${compactHash}`, window.location.href).href;
+
+  const output = document.getElementById('custom-catalog-link');
+  output.classList.remove('hidden');
+  output.innerHTML = `<input readonly value="${url}" id="custom-catalog-url-input"><button type="button" class="btn btn-primary" id="copy-custom-link" title="Copiar link do catálogo"><span class="copy-pages-icon" aria-hidden="true"></span>Copiar link</button><button type="button" class="btn btn-secondary" id="copy-short-custom-link" title="Gerar e copiar link curto">⚡ Copiar link curto</button><button type="button" class="btn btn-outline" id="share-custom-link">Compartilhar catálogo</button>`;
+
+  document.getElementById('copy-custom-link').onclick = () => {
+    const val = document.getElementById('custom-catalog-url-input').value;
+    navigator.clipboard.writeText(val).then(() => showToast('Link do catálogo copiado.', 'success'));
+  };
+
+  document.getElementById('copy-short-custom-link').onclick = async () => {
+    const btn = document.getElementById('copy-short-custom-link');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '⏳ Encurtando...';
+    btn.disabled = true;
+
+    try {
+      const shortUrl = await getShortenedUrl(url);
+      await navigator.clipboard.writeText(shortUrl);
+      document.getElementById('custom-catalog-url-input').value = shortUrl;
+      showToast('Link curto copiado com sucesso!', 'success');
+    } catch (err) {
+      console.error('Erro ao copiar link curto:', err);
+      showToast('Copiado link padrão.', 'info');
+      navigator.clipboard.writeText(url);
+    } finally {
+      btn.innerHTML = originalText;
+      btn.disabled = false;
+    }
+  };
+
+  document.getElementById('share-custom-link').onclick = () => {
+    const val = document.getElementById('custom-catalog-url-input').value;
+    navigator.share ? navigator.share({ title: 'Catálogo Dalbran', url: val }).catch(() => {}) : navigator.clipboard.writeText(val).then(() => showToast('Link copiado.', 'success'));
+  };
+}
+
+async function getShortenedUrl(longUrl) {
+  try {
+    const res = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`);
+    if (res.ok) {
+      const shortUrl = await res.text();
+      if (shortUrl && shortUrl.startsWith('http')) return shortUrl.trim();
+    }
+  } catch (e) {
+    console.warn('TinyURL error, tentando fallback:', e);
+  }
+  try {
+    const res = await fetch(`https://is.gd/create.php?format=json&url=${encodeURIComponent(longUrl)}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.shorturl) return data.shorturl;
+    }
+  } catch (e) {
+    console.warn('is.gd error:', e);
+  }
+  return longUrl;
+}
+function shareCatalogUrl(relativeUrl, title) { 
+  const url = new URL(relativeUrl, window.location.href).href; 
+  if (navigator.share) {
+    navigator.share({ title, url }).catch(() => {}); 
+  } else if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(() => showToast('Link do catálogo copiado.', 'success')); 
+  } else {
+    const input = document.createElement('input');
+    input.value = url;
+    document.body.appendChild(input);
+    input.select();
+    try {
+      document.execCommand('copy');
+      showToast('Link do catálogo copiado.', 'success');
+    } catch(e) {}
+    document.body.removeChild(input);
+  }
+}
+function escapeCatalogHtml(value) { return String(value || '').replace(/[&<>"']/g, char => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' })[char]); }
